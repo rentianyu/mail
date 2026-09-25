@@ -1,0 +1,54 @@
+name: Sync upstream
+
+# 自动跟随上游 maillab/cloud-mail，保持本 fork 与上游代码一致。
+# 实现：以 git 方式强制对齐到上游 main（GITHUB_TOKEN 即可），
+#       并把本 workflow 文件重新叠加回去，保证自动同步永不中断。
+on:
+  schedule:
+    - cron: "0 22 * * *" # 每天 UTC 22:00 = 北京时间次日 06:00
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync fork main with upstream main
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # 备份本 workflow 文件（强制对齐后需重新叠加，否则同步会中断）
+          mkdir -p /tmp/keep
+          cp .github/workflows/sync-upstream.yml /tmp/keep/sync-upstream.yml
+
+          git remote add upstream https://github.com/maillab/cloud-mail.git 2>/dev/null || true
+          git fetch --no-tags upstream main
+          UP=$(git rev-parse upstream/main)
+          echo "upstream: ${UP}"
+          echo "fork    : $(git rev-parse HEAD)"
+
+          if git merge-base --is-ancestor "${UP}" HEAD; then
+            echo "Fork already contains upstream main. Nothing to do."
+            exit 0
+          fi
+
+          git reset --hard "${UP}"
+          mkdir -p .github/workflows
+          cp /tmp/keep/sync-upstream.yml .github/workflows/sync-upstream.yml
+          git add .github/workflows/sync-upstream.yml
+          if git diff --cached --quiet; then
+            echo "Workflow file unchanged."
+          else
+            git commit -m "ci: follow upstream ${UP:0:7}"
+          fi
+          git push --force origin HEAD:main
+          echo "Done. fork main -> $(git rev-parse HEAD)"
