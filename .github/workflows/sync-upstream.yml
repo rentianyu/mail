@@ -1,8 +1,9 @@
 name: Sync upstream
 
-# 自动跟随上游 maillab/cloud-mail，保持本 fork 与上游代码一致。
-# 实现：以 git 方式强制对齐到上游 main（GITHUB_TOKEN 即可），
-#       并把本 workflow 文件重新叠加回去，保证自动同步永不中断。
+# 自动跟随上游 maillab/cloud-mail，并自动部署到 Cloudflare。
+# 说明：
+#  - fork main = 上游最新 + 本 workflow + 补丁（剔除 [ai] 绑定）
+#  - 本账号 Cloudflare 侧无法生成 ai binding（报 10021），故部署前剔除该绑定
 on:
   schedule:
     - cron: "0 22 * * *" # 每天 UTC 22:00 = 北京时间次日 06:00
@@ -10,6 +11,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: sync-upstream
@@ -18,6 +20,8 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.sync.outputs.changed }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,12 +29,12 @@ jobs:
           fetch-depth: 0
 
       - name: Sync fork main with upstream main
+        id: sync
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # 备份本 workflow 文件（强制对齐后需重新叠加，否则同步会中断）
           mkdir -p /tmp/keep
           cp .github/workflows/sync-upstream.yml /tmp/keep/sync-upstream.yml
 
@@ -41,18 +45,45 @@ jobs:
           echo "fork    : $(git rev-parse HEAD)"
 
           if git merge-base --is-ancestor "${UP}" HEAD; then
-            echo "Fork already contains upstream main. Nothing to do."
-            exit 0
+            echo "Fork already contains upstream main."
+          else
+            echo "Aligning to upstream..."
+            git reset --hard "${UP}"
           fi
 
-          git reset --hard "${UP}"
+          # 补丁：剔除 [ai] 绑定（本账号 Cloudflare 无法生成 ai binding，会导致部署报 10021）
+          python3 - <<'PY'
+import re
+for p in ["mail-worker/wrangler-action.toml","mail-worker/wrangler.toml"]:
+    try:
+        s=open(p).read()
+    except FileNotFoundError:
+        continue
+    s=re.sub(r'(?ms)^\[ai\][^\n]*\n(?:[^\[\n][^\n]*\n)*','',s)
+    open(p,'w').write(s)
+    print("patched",p)
+PY
+
           mkdir -p .github/workflows
           cp /tmp/keep/sync-upstream.yml .github/workflows/sync-upstream.yml
-          git add .github/workflows/sync-upstream.yml
+
+          git add -A
           if git diff --cached --quiet; then
-            echo "Workflow file unchanged."
+            echo "No changes to push."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
           else
-            git commit -m "ci: follow upstream ${UP:0:7}"
+            git commit -m "ci: sync upstream + drop [ai] binding"
+            git push --force origin HEAD:main
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "fork main -> $(git rev-parse HEAD)"
           fi
-          git push --force origin HEAD:main
-          echo "Done. fork main -> $(git rev-parse HEAD)"
+
+  deploy:
+    needs: sync
+    if: needs.sync.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Cloudflare deploy workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run deploy-cloudflare.yml --ref main --repo "${{ github.repository }}"
