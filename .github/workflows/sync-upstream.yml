@@ -87,3 +87,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh workflow run deploy-cloudflare.yml --ref main --repo "${{ github.repository }}"
+# cf-autobuild-disabled 2026-09-25
