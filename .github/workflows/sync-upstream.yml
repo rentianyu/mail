@@ -53,16 +53,16 @@ jobs:
 
           # 补丁：剔除 [ai] 绑定（本账号 Cloudflare 无法生成 ai binding，会导致部署报 10021）
           python3 - <<'PY'
-import re
-for p in ["mail-worker/wrangler-action.toml","mail-worker/wrangler.toml"]:
-    try:
-        s=open(p).read()
-    except FileNotFoundError:
-        continue
-    s=re.sub(r'(?ms)^\[ai\][^\n]*\n(?:[^\[\n][^\n]*\n)*','',s)
-    open(p,'w').write(s)
-    print("patched",p)
-PY
+          import re
+          for p in ["mail-worker/wrangler-action.toml","mail-worker/wrangler.toml"]:
+              try:
+                  s=open(p).read()
+              except FileNotFoundError:
+                  continue
+              s=re.sub(r'(?ms)^\[ai\][^\n]*\n(?:[^\[\n][^\n]*\n)*','',s)
+              open(p,'w').write(s)
+              print("patched",p)
+          PY
 
           mkdir -p .github/workflows
           cp /tmp/keep/sync-upstream.yml .github/workflows/sync-upstream.yml
