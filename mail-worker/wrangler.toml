@@ -22,8 +22,6 @@ enabled = true
 #[[send_email]]
 #name = "email"			#CF发件, 配置后优先使用
 
-[ai]
-binding = "ai"
 
 [assets]
 binding = "assets"		#静态资源绑定名默认不可修改
