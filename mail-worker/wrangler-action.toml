@@ -22,8 +22,6 @@ id = "${KV_NAMESPACE_ID}"
 binding = "r2"
 bucket_name = "${R2_BUCKET_NAME}"
 
-[ai]
-binding = "ai"
 
 [assets]
 binding = "assets"
