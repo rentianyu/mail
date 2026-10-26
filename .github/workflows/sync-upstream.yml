@@ -1,0 +1,116 @@
+name: Sync upstream
+
+# 自动跟随上游 maillab/cloud-mail，并自动部署到 Cloudflare。
+# 说明：
+#  - fork main = 上游最新 + 本 workflow + 补丁（剔除 [ai] 绑定）
+#  - 本账号 Cloudflare 侧无法生成 ai binding（报 10021），故部署前剔除该绑定
+#  - 认证：GITHUB_TOKEN 属于 App token，没有 workflows 权限，无法推送含
+#    .github/workflows/* 变更的提交（上游改动 deploy-cloudflare.yml 时 push 会被拒）。
+#    因此 checkout 使用 secrets.SYNC_TOKEN（带 workflow scope 的 PAT）。
+#  - 部署：PAT 推送会触发 push 事件的 deploy-cloudflare.yml；deploy job 仅在
+#    未检测到对应提交的部署运行时兜底手动触发，避免重复部署。
+on:
+  schedule:
+    - cron: "0 22 * * *" # 每天 UTC 22:00 = 北京时间次日 06:00
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.sync.outputs.changed }}
+      sha: ${{ steps.sync.outputs.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN }}
+
+      - name: Sync fork main with upstream main
+        id: sync
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          mkdir -p /tmp/keep
+          cp .github/workflows/sync-upstream.yml /tmp/keep/sync-upstream.yml
+
+          git remote add upstream https://github.com/maillab/cloud-mail.git 2>/dev/null || true
+          git fetch --no-tags upstream main
+          UP=$(git rev-parse upstream/main)
+          echo "upstream: ${UP}"
+          echo "fork    : $(git rev-parse HEAD)"
+
+          if git merge-base --is-ancestor "${UP}" HEAD; then
+            echo "Fork already contains upstream main."
+          else
+            echo "Aligning to upstream..."
+            git reset --hard "${UP}"
+          fi
+
+          # 补丁：剔除 [ai] 绑定（本账号 Cloudflare 无法生成 ai binding，会导致部署报 10021）
+          python3 - <<'PY'
+          import re
+          for p in ["mail-worker/wrangler-action.toml","mail-worker/wrangler.toml"]:
+              try:
+                  s=open(p).read()
+              except FileNotFoundError:
+                  continue
+              s=re.sub(r'(?ms)^\[ai\][^\n]*\n(?:[^\[\n][^\n]*\n)*','',s)
+              open(p,'w').write(s)
+              print("patched",p)
+          PY
+
+          mkdir -p .github/workflows
+          cp /tmp/keep/sync-upstream.yml .github/workflows/sync-upstream.yml
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to push."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "ci: sync upstream + drop [ai] binding"
+            git push --force origin HEAD:main
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            echo "fork main -> $(git rev-parse HEAD)"
+          fi
+
+  deploy:
+    needs: sync
+    if: needs.sync.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure Cloudflare deploy is triggered
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+          SHA="${{ needs.sync.outputs.sha }}"
+          echo "commit: ${SHA}"
+
+          # PAT 推送会触发 push 事件的部署（paths: mail-worker/**, mail-vue/**）。
+          # 这里只做兜底：等 GitHub 登记 run 后再判断，没有才手动触发，避免重复部署。
+          for i in 1 2 3 4 5 6; do
+            N=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow deploy-cloudflare.yml --commit "$SHA" --json databaseId --jq 'length' 2>/dev/null || echo 0)
+            if [ "${N:-0}" -gt 0 ]; then
+              echo "Deploy already triggered by push (${N} run)."
+              exit 0
+            fi
+            sleep 5
+          done
+
+          echo "No deploy run found for ${SHA}, dispatching manually."
+          gh workflow run deploy-cloudflare.yml --ref main --repo "$GITHUB_REPOSITORY"
+# cf-autobuild-disabled 2026-09-25
